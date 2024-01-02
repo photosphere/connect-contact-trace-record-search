@@ -14,7 +14,7 @@ def get_agent_interaction_duration(data):
     for part in parts:
         key_value = part.split('=')
         if key_value[0] == 'agentinteractionduration':
-            return key_value[1]
+            return convert_to_numeric(key_value[1])
 
 
 def get_after_contact_work_duration(data):
@@ -22,7 +22,13 @@ def get_after_contact_work_duration(data):
     for part in parts:
         key_value = part.split('=')
         if key_value[0] == 'aftercontactworkduration':
-            return key_value[1]
+            return convert_to_numeric(key_value[1])
+
+
+def convert_to_numeric(val):
+    if val == 'None':
+        return 0
+    return int(val)
 
 
 st.set_page_config(
@@ -76,15 +82,37 @@ if visualize_button:
     li = []
     for filename in all_files:
         df = pd.read_csv(filename, index_col=None, header=0)
+        df = df[df['channel'] == 'VOICE']
         not_null = df['agent'].notna()
-        df['agentinteractionduration'] = df.loc[not_null,
-                                                'agent'].apply(get_agent_interaction_duration)
-        df['aftercontactworkduration'] = df.loc[not_null,
-                                                'agent'].apply(get_after_contact_work_duration)
+        df['agentinteractionduration_seconds'] = df.loc[not_null,
+                                                        'agent'].apply(get_agent_interaction_duration)
+        df['aftercontactworkduration_seconds'] = df.loc[not_null,
+                                                        'agent'].apply(get_after_contact_work_duration)
 
-        df = df[['contactid', 'channel', 'initiationtimestamp', 'connectedtosystemtimestamp',
-                'agentinteractionduration', 'aftercontactworkduration', 'disconnecttimestamp']]
+        df['initiationtimestampnew'] = pd.to_datetime(
+            df['initiationtimestamp'])
+        df['disconnecttimestampnew'] = pd.to_datetime(
+            df['disconnecttimestamp'])
+        df['date'] = pd.to_datetime(
+            df['disconnecttimestamp']).dt.strftime('%Y-%m-%d')
+
+        df['contactduration'] = df['disconnecttimestampnew'] - \
+            df['initiationtimestampnew']
+        df['contactduration_seconds'] = df['contactduration'].dt.total_seconds()
+
+        df = df[['contactid', 'channel', 'initiationtimestamp', 'initiationtimestampnew', 'connectedtosystemtimestamp', 'date',
+                 'agentinteractionduration_seconds', 'aftercontactworkduration_seconds', 'disconnecttimestamp', 'disconnecttimestampnew', 'contactduration_seconds']]
         li.append(df)
 
     frame = pd.concat(li, axis=0, ignore_index=True)
+    frame = frame.sort_values(by='date').reset_index(drop=True)
     st.dataframe(frame)
+
+    # Daily aggregate
+    daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
+                                          'contactduration_seconds': 'sum'}).reset_index()
+    daily_df = daily_df.sort_values(by='date')
+
+    st.bar_chart(daily_df, x='date')
+
+    st.write(daily_df)
