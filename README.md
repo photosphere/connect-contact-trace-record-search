@@ -12,13 +12,13 @@ This solution can be used to search contact with specified attributes in Amazon 
 Clone the repo
 
 ```bash
-git clone https://github.com/photosphere/contact-trace-record-search.git
+git clone https://github.com/photosphere/connect-contact-trace-record-search.git
 ```
 
 cd into the project root folder
 
 ```bash
-cd contact-trace-record-search
+cd connect-contact-trace-record-search
 ```
 
 #### Create virtual environment
