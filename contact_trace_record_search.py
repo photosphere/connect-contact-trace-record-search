@@ -55,6 +55,7 @@ def read_parquet_files(folder_path):
         if file_name.endswith('.parquet'):
             file_path = os.path.join(folder_path, file_name)
             df = pd.read_parquet(file_path)
+            df['parquetfile'] = file_name
             dfs.append(df)
 
     combined_df = pd.concat(dfs, ignore_index=True)
