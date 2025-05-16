@@ -5,6 +5,10 @@ import boto3
 import json
 import os
 import glob
+import csv
+from datetime import datetime
+import io
+from io import BytesIO
 
 connect_client = boto3.client("connect")
 
@@ -48,6 +52,17 @@ def download_directory(bucket_name, prefix, local_dir):
                 st.write(f'Error downloading {object_key}: {e}')
 
 
+def detect_file_type(file_name):
+    """Detect file type based on extension."""
+    if file_name.lower().endswith('.csv'):
+        return 'csv'
+    elif file_name.lower().endswith('.parquet'):
+        return 'parquet'
+    elif file_name.lower().endswith('.json'):
+        return 'json'
+    else:
+        return None
+
 def read_parquet_files(folder_path):
     dfs = []
 
@@ -55,12 +70,111 @@ def read_parquet_files(folder_path):
         if file_name.endswith('.parquet'):
             file_path = os.path.join(folder_path, file_name)
             df = pd.read_parquet(file_path)
-            df['parquetfile'] = file_name
+            df['sourcefile'] = file_name
             dfs.append(df)
 
-    combined_df = pd.concat(dfs, ignore_index=True)
+    if dfs:
+        combined_df = pd.concat(dfs, ignore_index=True)
+        return combined_df
+    return pd.DataFrame()
 
-    return combined_df
+def save_dataframe_to_csv(df, output_dir, file_name=None, add_timestamp=False, 
+                         encoding='utf-8', sep=',', index=False, 
+                         na_rep='', date_format='%Y-%m-%d', 
+                         float_format='%.2f', quoting=csv.QUOTE_MINIMAL):
+    try:
+        # 创建输出目录（如果不存在）
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 设置默认文件名
+        if file_name is None:
+            file_name = 'data'
+            
+        # 添加时间戳到文件名（如果需要）
+        if add_timestamp:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            file_name = f"{file_name}_{timestamp}"
+        
+        # 确保文件名有.csv扩展名
+        if not file_name.endswith('.csv'):
+            file_name = f"{file_name}.csv"
+            
+        # 完整的文件路径
+        file_path = os.path.join(output_dir, file_name)
+        
+        # 保存DataFrame为CSV文件
+        df.to_csv(
+            path_or_buf=file_path,
+            sep=sep,
+            index=index,
+            encoding=encoding,
+            na_rep=na_rep,
+            float_format=float_format,
+            date_format=date_format,
+            quoting=quoting
+        )
+        
+        print(f"CSV文件已保存至: {file_path}")
+        return file_path
+        
+    except Exception as e:
+        print(f"保存CSV文件时出错: {str(e)}")
+        raise
+    
+def load_files_from_s3(bucket_name, folder_prefix, folder_path):
+    """Load files from S3 based on their type and prefix."""
+    obj_cnt = 0
+    no_file_found = True
+    all_dfs = []  # List to store all dataframes
+    
+    # Use paginator to handle large number of objects
+    paginator = s3_client.get_paginator('list_objects_v2')
+    
+    # If folder_prefix is provided, use it to filter objects
+    if folder_prefix:
+        pages = paginator.paginate(Bucket=bucket_name, Prefix=folder_prefix)
+    else:
+        pages = paginator.paginate(Bucket=bucket_name)
+    
+    # Process each object
+    for page in pages:
+        for obj in page.get('Contents', []):
+            object_key = obj['Key']
+            file_type = detect_file_type(object_key)
+            
+            if file_type:
+                filename = os.path.basename(object_key)
+                
+                try:
+                    s3_obj = s3_client.get_object(Bucket=bucket_name, Key=object_key)
+                    file_content = s3_obj['Body'].read()
+                    
+                    if file_type == 'csv':
+                        df = pd.read_csv(BytesIO(file_content))
+                    elif file_type == 'parquet':
+                        df = pd.read_parquet(BytesIO(file_content))
+                    elif file_type == 'json':
+                        df = pd.read_json(BytesIO(file_content))
+                    
+                    # Add source file information
+                    df['sourcefile'] = filename
+                    all_dfs.append(df)
+                    
+                    no_file_found = False
+                    obj_cnt += 1
+                    st.write(f"Processed {object_key}")
+                except Exception as e:
+                    st.error(f"Error processing {object_key}: {e}")
+    
+    # Combine all dataframes into one
+    if all_dfs:
+        combined_df = pd.concat(all_dfs, ignore_index=True)
+        # Save the combined dataframe
+        save_dataframe_to_csv(combined_df, folder_path, file_name="ctr_data")
+    else:
+        combined_df = pd.DataFrame()
+    
+    return obj_cnt, no_file_found
 
 
 s3_client = boto3.client('s3')
@@ -83,39 +197,32 @@ s3_path = st.text_input(
 
 folder_prefix = ''
 if s3_path:
-    parts = s3_path.split("://")
-    bucket_name = parts[1].split("/")[0]
-    folder_prefix = "/".join(parts[1].split("/")[1:])
+    if "://" in s3_path:
+        parts = s3_path.split("://")
+        if len(parts) > 1:
+            bucket_name = parts[1].split("/")[0]
+            folder_prefix = "/".join(parts[1].split("/")[1:]) if len(parts[1].split("/")) > 1 else ''
+            st.write(f"Parsed bucket: {bucket_name}, prefix: {folder_prefix}")
+    else:
+        bucket_name = s3_path
 
 folder_path = 'CTRs'
 
 if not os.path.exists(folder_path):
     os.makedirs(folder_path, exist_ok=True)
 
-col1, col2, col3 = st.columns(3)
+col1, col2 = st.columns(2)
 
 # contacts
 with col1:
-    load_csv_button = st.button('Load CSV')
-    if load_csv_button:
-        with st.spinner('Loading......'):
-            s3 = boto3.resource('s3')
-            bucket = s3.Bucket(bucket_name)
-            obj_cnt = 0
-            no_file_found = True
-            for obj in bucket.objects.all():
-                if obj.key.endswith('.csv'):
-                    df = pd.read_csv(obj.get()['Body'])
-                    filename = obj.key.split('/')[-1]
-                    file_path = os.path.join(folder_path, filename)
-                    df.to_csv(file_path, index=False)
-                    no_file_found = False
-                    obj_cnt += 1
-
-            st.write("Files in S3 Bucket:"+str(obj_cnt))
+    load_button = st.button('Load')
+    if load_button:
+        with st.spinner('Loading files from S3...'):
+            st.write(f"Loading from bucket: {bucket_name}, prefix: {folder_prefix if folder_prefix else 'None'}")
+            obj_cnt, no_file_found = load_files_from_s3(bucket_name, folder_prefix, folder_path)
+            st.write(f"Files loaded from S3 Bucket: {obj_cnt}")
             if no_file_found:
-                st.write("No CSV file found.")
-
+                st.write("No files found.")
 
 with col2:
     visualize_button = st.button('Visualize CSV')
@@ -146,29 +253,64 @@ with col2:
                     'agentinteractionduration_seconds', 'aftercontactworkduration_seconds', 'disconnecttimestamp', 'disconnecttimestampnew', 'contactduration_seconds']]
             li.append(df)
 
-        frame = pd.concat(li, axis=0, ignore_index=True)
-        frame = frame.sort_values(by='date').reset_index(drop=True)
-        st.dataframe(frame)
+        if li:
+            frame = pd.concat(li, axis=0, ignore_index=True)
+            frame = frame.sort_values(by='date').reset_index(drop=True)
+            st.dataframe(frame)
 
-        # Daily aggregate
-        daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
-                                              'contactduration_seconds': 'sum'}).reset_index()
-        daily_df = daily_df.sort_values(by='date')
+            # Daily aggregate
+            daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
+                                                'contactduration_seconds': 'sum'}).reset_index()
+            daily_df = daily_df.sort_values(by='date')
 
-        st.bar_chart(daily_df, x='date')
-
-        st.write(daily_df)
-
-load_parquet_button = st.button('Load Parquet')
-if load_parquet_button:
-    with st.spinner('Loading......'):
-        download_directory(bucket_name, folder_prefix, folder_path)
+            st.bar_chart(daily_df, x='date')
+            st.write(daily_df)
+        else:
+            st.write("No CSV files found to visualize.")
 
 contact_id = st.text_input('Contact Id')
-search_parquet_button = st.button('Search')
-if search_parquet_button:
-    df = read_parquet_files(folder_path)
-    filtered_df = df
-    if contact_id:
-        filtered_df = df[(df['contactid'] == contact_id)]
-    st.write(filtered_df)
+search_button = st.button('Search')
+if search_button:
+    # Read all parquet files
+    parquet_df = read_parquet_files(folder_path)
+    
+    # Read all CSV files
+    csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
+    csv_dfs = []
+    for filename in csv_files:
+        try:
+            df = pd.read_csv(filename)
+            df['sourcefile'] = os.path.basename(filename)
+            csv_dfs.append(df)
+        except Exception as e:
+            st.error(f"Error reading {filename}: {e}")
+    
+    # Combine dataframes if they exist
+    dfs_to_combine = []
+    if not parquet_df.empty:
+        dfs_to_combine.append(parquet_df)
+    if csv_dfs:
+        csv_combined = pd.concat(csv_dfs, ignore_index=True)
+        dfs_to_combine.append(csv_combined)
+    
+    if dfs_to_combine:
+        # Try to combine all dataframes if they have compatible columns
+        try:
+            combined_df = pd.concat(dfs_to_combine, ignore_index=True)
+            filtered_df = combined_df
+            if contact_id:
+                filtered_df = combined_df[combined_df['contactid'] == contact_id]
+            st.write(filtered_df)
+        except Exception as e:
+            st.error(f"Error combining dataframes: {e}")
+            # Display them separately
+            for i, df in enumerate(dfs_to_combine):
+                st.subheader(f"Dataset {i+1}")
+                if contact_id:
+                    try:
+                        df = df[df['contactid'] == contact_id]
+                    except:
+                        pass
+                st.write(df)
+    else:
+        st.write("No data files found to search.")
