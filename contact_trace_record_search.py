@@ -78,6 +78,36 @@ def read_parquet_files(folder_path):
         return combined_df
     return pd.DataFrame()
 
+def search_ctr_data(folder_path, contact_id=None):
+    """
+    Load ctr_data.csv file and search for records matching the contact_id.
+    
+    Args:
+        folder_path: Path to the folder containing ctr_data.csv
+        contact_id: Contact ID to search for
+        
+    Returns:
+        DataFrame with matching records or all records if contact_id is None
+    """
+    ctr_file_path = os.path.join(folder_path, "ctr_data.csv")
+    
+    if not os.path.exists(ctr_file_path):
+        st.warning(f"File not found: {ctr_file_path}")
+        return pd.DataFrame()
+    
+    try:
+        df = pd.read_csv(ctr_file_path)
+        if contact_id and not df.empty:
+            if 'contactid' in df.columns:
+                return df[df['contactid'] == contact_id]
+            else:
+                st.warning("Column 'contactid' not found in the data")
+                return df
+        return df
+    except Exception as e:
+        st.error(f"Error reading {ctr_file_path}: {e}")
+        return pd.DataFrame()
+
 def save_dataframe_to_csv(df, output_dir, file_name=None, add_timestamp=False, 
                          encoding='utf-8', sep=',', index=False, 
                          na_rep='', date_format='%Y-%m-%d', 
@@ -271,46 +301,11 @@ with col2:
 contact_id = st.text_input('Contact Id')
 search_button = st.button('Search')
 if search_button:
-    # Read all parquet files
-    parquet_df = read_parquet_files(folder_path)
+    # Use the new search function to find matching records in ctr_data.csv
+    result_df = search_ctr_data(folder_path, contact_id)
     
-    # Read all CSV files
-    csv_files = glob.glob(os.path.join(folder_path, "*.csv"))
-    csv_dfs = []
-    for filename in csv_files:
-        try:
-            df = pd.read_csv(filename)
-            df['sourcefile'] = os.path.basename(filename)
-            csv_dfs.append(df)
-        except Exception as e:
-            st.error(f"Error reading {filename}: {e}")
-    
-    # Combine dataframes if they exist
-    dfs_to_combine = []
-    if not parquet_df.empty:
-        dfs_to_combine.append(parquet_df)
-    if csv_dfs:
-        csv_combined = pd.concat(csv_dfs, ignore_index=True)
-        dfs_to_combine.append(csv_combined)
-    
-    if dfs_to_combine:
-        # Try to combine all dataframes if they have compatible columns
-        try:
-            combined_df = pd.concat(dfs_to_combine, ignore_index=True)
-            filtered_df = combined_df
-            if contact_id:
-                filtered_df = combined_df[combined_df['contactid'] == contact_id]
-            st.write(filtered_df)
-        except Exception as e:
-            st.error(f"Error combining dataframes: {e}")
-            # Display them separately
-            for i, df in enumerate(dfs_to_combine):
-                st.subheader(f"Dataset {i+1}")
-                if contact_id:
-                    try:
-                        df = df[df['contactid'] == contact_id]
-                    except:
-                        pass
-                st.write(df)
+    if not result_df.empty:
+        st.write(f"Found {len(result_df)} matching records:")
+        st.dataframe(result_df)
     else:
-        st.write("No data files found to search.")
+        st.write("No matching records found.")
