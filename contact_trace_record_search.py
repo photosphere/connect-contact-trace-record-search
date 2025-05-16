@@ -3,57 +3,39 @@ import streamlit as st
 import pandas as pd
 import boto3
 import json
-import os
 import glob
 import csv
 from datetime import datetime
-import io
 from io import BytesIO
 
+# 创建 AWS 客户端
+s3_client = boto3.client('s3')
 connect_client = boto3.client("connect")
 
+def convert_to_numeric(val):
+    """将值转换为数字，如果为'None'则返回0"""
+    if val == 'None':
+        return 0
+    return int(val)
 
 def get_agent_interaction_duration(data):
+    """从 agent 数据中提取 agentinteractionduration 值"""
     parts = data.split(', ')
     for part in parts:
         key_value = part.split('=')
         if key_value[0] == 'agentinteractionduration':
             return convert_to_numeric(key_value[1])
 
-
 def get_after_contact_work_duration(data):
+    """从 agent 数据中提取 aftercontactworkduration 值"""
     parts = data.split(', ')
     for part in parts:
         key_value = part.split('=')
         if key_value[0] == 'aftercontactworkduration':
             return convert_to_numeric(key_value[1])
 
-
-def convert_to_numeric(val):
-    if val == 'None':
-        return 0
-    return int(val)
-
-
-def download_directory(bucket_name, prefix, local_dir):
-    paginator = s3_client.get_paginator('list_objects_v2')
-    pages = paginator.paginate(Bucket=bucket_name, Prefix=prefix)
-
-    for page in pages:
-        for obj in page.get('Contents', []):
-            object_key = obj['Key']
-            local_file_path = os.path.join(
-                local_dir, os.path.relpath(object_key, prefix))
-            try:
-                s3_client.download_file(
-                    bucket_name, object_key, local_file_path)
-                st.write(f'Downloaded {object_key} to {local_file_path}')
-            except Exception as e:
-                st.write(f'Error downloading {object_key}: {e}')
-
-
 def detect_file_type(file_name):
-    """Detect file type based on extension."""
+    """根据文件扩展名检测文件类型"""
     if file_name.lower().endswith('.csv'):
         return 'csv'
     elif file_name.lower().endswith('.parquet'):
@@ -63,36 +45,21 @@ def detect_file_type(file_name):
     else:
         return None
 
-def read_parquet_files(folder_path):
-    dfs = []
-
-    for file_name in os.listdir(folder_path):
-        if file_name.endswith('.parquet'):
-            file_path = os.path.join(folder_path, file_name)
-            df = pd.read_parquet(file_path)
-            df['sourcefile'] = file_name
-            dfs.append(df)
-
-    if dfs:
-        combined_df = pd.concat(dfs, ignore_index=True)
-        return combined_df
-    return pd.DataFrame()
-
 def search_ctr_data(folder_path, contact_id=None):
     """
-    Load ctr_data.csv file and search for records matching the contact_id.
+    加载 ctr_data.csv 文件并搜索匹配 contact_id 的记录
     
     Args:
-        folder_path: Path to the folder containing ctr_data.csv
-        contact_id: Contact ID to search for
+        folder_path: 包含 ctr_data.csv 的文件夹路径
+        contact_id: 要搜索的联系 ID
         
     Returns:
-        DataFrame with matching records or all records if contact_id is None
+        包含匹配记录的 DataFrame，如果 contact_id 为 None，则返回所有记录
     """
     ctr_file_path = os.path.join(folder_path, "ctr_data.csv")
     
     if not os.path.exists(ctr_file_path):
-        st.warning(f"File not found: {ctr_file_path}")
+        st.warning(f"文件未找到: {ctr_file_path}")
         return pd.DataFrame()
     
     try:
@@ -101,17 +68,20 @@ def search_ctr_data(folder_path, contact_id=None):
             if 'contactid' in df.columns:
                 return df[df['contactid'] == contact_id]
             else:
-                st.warning("Column 'contactid' not found in the data")
+                st.warning("数据中未找到'contactid'列")
                 return df
         return df
     except Exception as e:
-        st.error(f"Error reading {ctr_file_path}: {e}")
+        st.error(f"读取 {ctr_file_path} 时出错: {e}")
         return pd.DataFrame()
 
 def save_dataframe_to_csv(df, output_dir, file_name=None, add_timestamp=False, 
                          encoding='utf-8', sep=',', index=False, 
                          na_rep='', date_format='%Y-%m-%d', 
                          float_format='%.2f', quoting=csv.QUOTE_MINIMAL):
+    """
+    将 DataFrame 保存为 CSV 文件
+    """
     try:
         # 创建输出目录（如果不存在）
         os.makedirs(output_dir, exist_ok=True)
@@ -152,21 +122,23 @@ def save_dataframe_to_csv(df, output_dir, file_name=None, add_timestamp=False,
         raise
     
 def load_files_from_s3(bucket_name, folder_prefix, folder_path):
-    """Load files from S3 based on their type and prefix."""
+    """
+    根据类型和前缀从 S3 加载文件
+    """
     obj_cnt = 0
     no_file_found = True
-    all_dfs = []  # List to store all dataframes
+    all_dfs = []  # 存储所有数据帧的列表
     
-    # Use paginator to handle large number of objects
+    # 使用分页器处理大量对象
     paginator = s3_client.get_paginator('list_objects_v2')
     
-    # If folder_prefix is provided, use it to filter objects
+    # 如果提供了 folder_prefix，使用它过滤对象
     if folder_prefix:
         pages = paginator.paginate(Bucket=bucket_name, Prefix=folder_prefix)
     else:
         pages = paginator.paginate(Bucket=bucket_name)
     
-    # Process each object
+    # 处理每个对象
     for page in pages:
         for obj in page.get('Contents', []):
             object_key = obj['Key']
@@ -186,20 +158,20 @@ def load_files_from_s3(bucket_name, folder_prefix, folder_path):
                     elif file_type == 'json':
                         df = pd.read_json(BytesIO(file_content))
                     
-                    # Add source file information
+                    # 添加源文件信息
                     df['sourcefile'] = filename
                     all_dfs.append(df)
                     
                     no_file_found = False
                     obj_cnt += 1
-                    st.write(f"Processed {object_key}")
+                    st.write(f"已处理 {object_key}")
                 except Exception as e:
-                    st.error(f"Error processing {object_key}: {e}")
+                    st.error(f"处理 {object_key} 时出错: {e}")
     
-    # Combine all dataframes into one
+    # 将所有数据帧合并为一个
     if all_dfs:
         combined_df = pd.concat(all_dfs, ignore_index=True)
-        # Save the combined dataframe
+        # 保存合并的数据帧
         save_dataframe_to_csv(combined_df, folder_path, file_name="ctr_data")
     else:
         combined_df = pd.DataFrame()
@@ -207,24 +179,24 @@ def load_files_from_s3(bucket_name, folder_prefix, folder_path):
     return obj_cnt, no_file_found
 
 
-s3_client = boto3.client('s3')
-
+# 设置页面配置
 st.set_page_config(
     page_title="Amazon Connect Contact Search Plus Tool!", layout="wide")
 
-# app title
-st.header(f"Amazon Connect Contact Search Plus Tool!")
+# 应用标题
+st.header("Amazon Connect Contact Search Plus Tool!")
 
+# 读取存储的 S3 桶名称
 bucket_name = ''
 if os.path.exists('s3bucket.json'):
     with open('s3bucket.json') as f:
         json_data = json.load(f)
         bucket_name = json_data['BucketName']
 
-# connect configuration
-s3_path = st.text_input(
-    'S3 Bucket Name', value=bucket_name)
+# Connect 配置
+s3_path = st.text_input('S3 Bucket Name', value=bucket_name)
 
+# 解析 S3 路径
 folder_prefix = ''
 if s3_path:
     if "://" in s3_path:
@@ -232,28 +204,30 @@ if s3_path:
         if len(parts) > 1:
             bucket_name = parts[1].split("/")[0]
             folder_prefix = "/".join(parts[1].split("/")[1:]) if len(parts[1].split("/")) > 1 else ''
-            st.write(f"Parsed bucket: {bucket_name}, prefix: {folder_prefix}")
+            st.write(f"解析的桶: {bucket_name}, 前缀: {folder_prefix}")
     else:
         bucket_name = s3_path
 
+# 创建存储文件夹
 folder_path = 'CTRs'
-
 if not os.path.exists(folder_path):
     os.makedirs(folder_path, exist_ok=True)
 
+# 创建两列布局
 col1, col2 = st.columns(2)
 
-# contacts
+# 第一列：加载控件
 with col1:
     load_button = st.button('Load')
     if load_button:
-        with st.spinner('Loading files from S3...'):
-            st.write(f"Loading from bucket: {bucket_name}, prefix: {folder_prefix if folder_prefix else 'None'}")
+        with st.spinner('从 S3 加载文件中...'):
+            st.write(f"从桶加载: {bucket_name}, 前缀: {folder_prefix if folder_prefix else 'None'}")
             obj_cnt, no_file_found = load_files_from_s3(bucket_name, folder_prefix, folder_path)
-            st.write(f"Files loaded from S3 Bucket: {obj_cnt}")
+            st.write(f"从 S3 桶加载的文件数: {obj_cnt}")
             if no_file_found:
-                st.write("No files found.")
+                st.write("未找到文件。")
 
+# 第二列：可视化控件
 with col2:
     visualize_button = st.button('Visualize CSV')
     if visualize_button:
@@ -288,7 +262,7 @@ with col2:
             frame = frame.sort_values(by='date').reset_index(drop=True)
             st.dataframe(frame)
 
-            # Daily aggregate
+            # 每日聚合
             daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
                                                 'contactduration_seconds': 'sum'}).reset_index()
             daily_df = daily_df.sort_values(by='date')
@@ -296,16 +270,17 @@ with col2:
             st.bar_chart(daily_df, x='date')
             st.write(daily_df)
         else:
-            st.write("No CSV files found to visualize.")
+            st.write("未找到可视化的 CSV 文件。")
 
+# 搜索功能
 contact_id = st.text_input('Contact Id')
 search_button = st.button('Search')
 if search_button:
-    # Use the new search function to find matching records in ctr_data.csv
+    # 使用搜索函数在 ctr_data.csv 中查找匹配记录
     result_df = search_ctr_data(folder_path, contact_id)
     
     if not result_df.empty:
-        st.write(f"Found {len(result_df)} matching records:")
+        st.write(f"找到 {len(result_df)} 条匹配记录:")
         st.dataframe(result_df)
     else:
-        st.write("No matching records found.")
+        st.write("未找到匹配记录。")
