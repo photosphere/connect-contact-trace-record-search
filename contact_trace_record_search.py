@@ -164,15 +164,20 @@ def load_files_from_s3(bucket_name, folder_prefix, folder_path):
                     
                     no_file_found = False
                     obj_cnt += 1
-                    st.write(f"已处理 {object_key}")
+                    
+                    # 添加日志消息到session_state
+                    st.session_state.log_messages.append(f"已处理 {object_key}")
+                        
                 except Exception as e:
-                    st.error(f"处理 {object_key} 时出错: {e}")
+                    error_msg = f"处理 {object_key} 时出错: {e}"
+                    st.session_state.log_messages.append(f"❌ {error_msg}")
     
     # 将所有数据帧合并为一个
     if all_dfs:
         combined_df = pd.concat(all_dfs, ignore_index=True)
         # 保存合并的数据帧
         save_dataframe_to_csv(combined_df, folder_path, file_name="ctr_data")
+        st.session_state.log_messages.append(f"✅ 已保存合并数据到 {os.path.join(folder_path, 'ctr_data.csv')}")
     else:
         combined_df = pd.DataFrame()
     
@@ -183,18 +188,37 @@ def load_files_from_s3(bucket_name, folder_prefix, folder_path):
 st.set_page_config(
     page_title="Amazon Connect Contact Search Plus Tool!", layout="wide")
 
+# 添加自定义CSS样式
+st.markdown("""
+<style>
+.scrollable-container {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid #ddd;
+    padding: 10px;
+    border-radius: 5px;
+    background-color: #f9f9f9;
+    margin-bottom: 20px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # 应用标题
 st.header("Amazon Connect Contact Search Plus Tool!")
 
-# 读取存储的 S3 桶名称
-bucket_name = ''
-if os.path.exists('s3bucket.json'):
-    with open('s3bucket.json') as f:
-        json_data = json.load(f)
-        bucket_name = json_data['BucketName']
+# 初始化 session_state 以保存输入值
+if 's3_path' not in st.session_state:
+    # 读取存储的 S3 桶名称
+    bucket_name = ''
+    if os.path.exists('s3bucket.json'):
+        with open('s3bucket.json') as f:
+            json_data = json.load(f)
+            bucket_name = json_data['BucketName']
+    st.session_state.s3_path = bucket_name
 
 # Connect 配置
-s3_path = st.text_input('S3 Bucket Name', value=bucket_name)
+s3_path = st.text_input('S3 Bucket Name', value=st.session_state.s3_path, key='s3_path_input')
+st.session_state.s3_path = s3_path
 
 # 解析 S3 路径
 folder_prefix = ''
@@ -213,67 +237,105 @@ folder_path = 'CTRs'
 if not os.path.exists(folder_path):
     os.makedirs(folder_path, exist_ok=True)
 
-# 创建两列布局
-col1, col2 = st.columns(2)
+# 初始化日志消息列表
+if 'log_messages' not in st.session_state:
+    st.session_state.log_messages = []
 
-# 第一列：加载控件
-with col1:
-    load_button = st.button('Load')
-    if load_button:
-        with st.spinner('从 S3 加载文件中...'):
-            st.write(f"从桶加载: {bucket_name}, 前缀: {folder_prefix if folder_prefix else 'None'}")
-            obj_cnt, no_file_found = load_files_from_s3(bucket_name, folder_prefix, folder_path)
-            st.write(f"从 S3 桶加载的文件数: {obj_cnt}")
-            if no_file_found:
-                st.write("未找到文件。")
+# 创建一个固定位置的日志容器
+log_container = st.container()
 
-# 第二列：可视化控件
-with col2:
-    visualize_button = st.button('Visualize CSV')
-    if visualize_button:
-        all_files = glob.glob(os.path.join(folder_path, "*.csv"))
-        li = []
-        for filename in all_files:
-            df = pd.read_csv(filename, index_col=None, header=0)
-            df = df[df['channel'] == 'VOICE']
-            not_null = df['agent'].notna()
-            df['agentinteractionduration_seconds'] = df.loc[not_null,
-                                                            'agent'].apply(get_agent_interaction_duration)
-            df['aftercontactworkduration_seconds'] = df.loc[not_null,
-                                                            'agent'].apply(get_after_contact_work_duration)
-
-            df['initiationtimestampnew'] = pd.to_datetime(
-                df['initiationtimestamp'])
-            df['disconnecttimestampnew'] = pd.to_datetime(
-                df['disconnecttimestamp'])
-            df['date'] = pd.to_datetime(
-                df['disconnecttimestamp']).dt.strftime('%Y-%m-%d')
-
-            df['contactduration'] = df['disconnecttimestampnew'] - \
-                df['initiationtimestampnew']
-            df['contactduration_seconds'] = df['contactduration'].dt.total_seconds()
-
-            df = df[['contactid', 'channel', 'initiationtimestamp', 'initiationtimestampnew', 'connectedtosystemtimestamp', 'date',
-                    'agentinteractionduration_seconds', 'aftercontactworkduration_seconds', 'disconnecttimestamp', 'disconnecttimestampnew', 'contactduration_seconds']]
-            li.append(df)
-
-        if li:
-            frame = pd.concat(li, axis=0, ignore_index=True)
-            frame = frame.sort_values(by='date').reset_index(drop=True)
-            st.dataframe(frame)
-
-            # 每日聚合
-            daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
-                                                'contactduration_seconds': 'sum'}).reset_index()
-            daily_df = daily_df.sort_values(by='date')
-
-            st.bar_chart(daily_df, x='date')
-            st.write(daily_df)
+# Load 按钮
+load_button = st.button('Load')
+if load_button:
+    with st.spinner('从 S3 加载文件中...'):
+        # 清空之前的日志
+        st.session_state.log_messages = []
+        st.session_state.log_messages.append(f"从桶加载: {bucket_name}, 前缀: {folder_prefix if folder_prefix else 'None'}")
+        
+        # 调用加载函数
+        obj_cnt, no_file_found = load_files_from_s3(bucket_name, folder_prefix, folder_path)
+        
+        # 显示结果摘要
+        if no_file_found:
+            st.session_state.log_messages.append("### 未找到文件。")
         else:
-            st.write("未找到可视化的 CSV 文件。")
+            st.session_state.log_messages.append(f"### 从 S3 桶加载的文件数: {obj_cnt}")
+
+# 在固定的容器中显示日志
+with log_container:
+    if st.session_state.log_messages:
+        # 使用HTML创建固定高度的滚动区域
+        log_html = "<div class='scrollable-log'>" + "<br>".join(st.session_state.log_messages) + "</div>"
+        st.markdown(log_html, unsafe_allow_html=True)
+        
+        # 添加CSS样式
+        st.markdown("""
+        <style>
+        .scrollable-log {
+            height: 300px;
+            overflow-y: auto;
+            border: 1px solid #ddd;
+            padding: 10px;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+            margin-bottom: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+
+visualize_button = st.button('Visualize CSV')
+if visualize_button:
+    all_files = glob.glob(os.path.join(folder_path, "*.csv"))
+    li = []
+    for filename in all_files:
+        df = pd.read_csv(filename, index_col=None, header=0)
+        df = df[df['channel'] == 'VOICE']
+        not_null = df['agent'].notna()
+        df['agentinteractionduration_seconds'] = df.loc[not_null,
+                                                        'agent'].apply(get_agent_interaction_duration)
+        df['aftercontactworkduration_seconds'] = df.loc[not_null,
+                                                        'agent'].apply(get_after_contact_work_duration)
+
+        df['initiationtimestampnew'] = pd.to_datetime(
+            df['initiationtimestamp'])
+        df['disconnecttimestampnew'] = pd.to_datetime(
+            df['disconnecttimestamp'])
+        df['date'] = pd.to_datetime(
+            df['disconnecttimestamp']).dt.strftime('%Y-%m-%d')
+
+        df['contactduration'] = df['disconnecttimestampnew'] - \
+            df['initiationtimestampnew']
+        df['contactduration_seconds'] = df['contactduration'].dt.total_seconds()
+
+        df = df[['contactid', 'channel', 'initiationtimestamp', 'initiationtimestampnew', 'connectedtosystemtimestamp', 'date',
+                'agentinteractionduration_seconds', 'aftercontactworkduration_seconds', 'disconnecttimestamp', 'disconnecttimestampnew', 'contactduration_seconds']]
+        li.append(df)
+
+    if li:
+        frame = pd.concat(li, axis=0, ignore_index=True)
+        frame = frame.sort_values(by='date').reset_index(drop=True)
+        st.dataframe(frame)
+
+        # 每日聚合
+        daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
+                                            'contactduration_seconds': 'sum'}).reset_index()
+        daily_df = daily_df.sort_values(by='date')
+
+        st.bar_chart(daily_df, x='date')
+        st.write(daily_df)
+    else:
+        st.write("未找到可视化的 CSV 文件。")
 
 # 搜索功能
-contact_id = st.text_input('Contact Id')
+if 'contact_id' not in st.session_state:
+    st.session_state.contact_id = ''
+
+contact_id = st.text_input('Contact Id', value=st.session_state.contact_id, key='contact_id_input')
+st.session_state.contact_id = contact_id
+
 search_button = st.button('Search')
 if search_button:
     # 使用搜索函数在 ctr_data.csv 中查找匹配记录
