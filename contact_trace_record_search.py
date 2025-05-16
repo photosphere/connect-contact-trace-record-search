@@ -3,10 +3,13 @@ import streamlit as st
 import pandas as pd
 import boto3
 import json
-import glob
 import csv
 from datetime import datetime
 from io import BytesIO
+import datetime
+import numpy as np
+import altair as alt
+from dateutil.parser import parse
 
 # 创建 AWS 客户端
 s3_client = boto3.client('s3')
@@ -183,6 +186,191 @@ def load_files_from_s3(bucket_name, folder_prefix, folder_path):
     
     return obj_cnt, no_file_found
 
+def contact_delay_analyzer(file_path=None):
+    """
+    创建Streamlit应用来分析和可视化联系记录数据。
+    
+    功能：
+    1. 根据contactid筛选数据，选择lastupdatetimestamp最新时间的记录
+    2. 计算connectedtosystemtimestamp和initiationtimestamp之间的时间差（秒）
+    3. 允许用户筛选大于特定时间差的记录并统计数量
+    
+    参数：
+    - csv_data: 字符串，CSV数据内容
+    - file_path: 字符串，CSV文件路径（如果csv_data为None）
+    
+    返回值：
+    - 无，直接在Streamlit界面上显示结果
+    """
+    # 当用户点击下载按钮时，保持分析状态
+    if 'show_analysis' not in st.session_state:
+        st.session_state.show_analysis = True
+    st.title("联系记录延迟分析工具")
+    
+    # 读取数据
+    df = None
+    if file_path:
+        df = pd.read_csv(file_path)
+    else:
+        st.warning(f"数据中未找到{file_path}")
+    
+    if df is None:
+        st.info("请上传CSV文件或提供数据")
+        return
+    
+    # 数据预处理
+    st.subheader("数据预处理")
+    with st.expander("查看原始数据", expanded=False):
+        st.dataframe(df)
+    
+    # 将时间戳列转换为日期时间格式
+    for col in ['connectedtosystemtimestamp', 'initiationtimestamp', 'lastupdatetimestamp']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
+    
+    # 计算时间差（秒）
+    df['delay_seconds'] = (df['connectedtosystemtimestamp'] - df['initiationtimestamp']).dt.total_seconds()
+    
+    # 对于每个contactid，保留lastupdatetimestamp最新的记录
+    st.write("按contactid筛选并保留最新更新的记录:")
+    latest_records = df.sort_values('lastupdatetimestamp').groupby('contactid').last().reset_index()
+    
+    # 显示处理后的数据
+    with st.expander("查看筛选后的数据", expanded=True):
+        st.dataframe(latest_records[['contactid', 'initiationtimestamp', 
+                                    'connectedtosystemtimestamp', 'delay_seconds', 
+                                    'lastupdatetimestamp']])
+    
+    # 基本统计信息
+    st.subheader("延迟时间统计信息")
+    delay_stats = latest_records['delay_seconds'].describe()
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("平均延迟时间（秒）", f"{delay_stats['mean']:.2f}")
+        st.metric("最大延迟时间（秒）", f"{delay_stats['max']:.2f}")
+        st.metric("总记录数", len(latest_records))
+    
+    with col2:
+        st.metric("中位数延迟时间（秒）", f"{delay_stats['50%']:.2f}")
+        st.metric("最小延迟时间（秒）", f"{delay_stats['min']:.2f}")
+        st.metric("联系ID数量", latest_records['contactid'].nunique())
+    
+    # 创建延迟时间分布的直方图 (使用Altair)
+    st.subheader("延迟时间分布")
+    
+    # 为了创建直方图，我们需要使用altair
+    chart = alt.Chart(latest_records).mark_bar().encode(
+        alt.X('delay_seconds:Q', bin=alt.Bin(maxbins=20), title='延迟时间（秒）'),
+        alt.Y('count():Q', title='数量')
+    ).properties(
+        title='连接系统延迟时间分布（秒）'
+    )
+    st.altair_chart(chart, use_container_width=True)
+    
+    # 交互式时间差筛选
+    st.subheader("延迟时间筛选分析")
+    min_delay = float(latest_records['delay_seconds'].min())
+    max_delay = float(latest_records['delay_seconds'].max())
+    
+    # 滑动条用于选择延迟阈值
+    delay_threshold = st.slider(
+        "选择延迟阈值（秒）",
+        min_value=min_delay,
+        max_value=max_delay,
+        value=min_delay,
+        step=0.1
+    )
+    
+    # 筛选大于阈值的记录
+    filtered_records = latest_records[latest_records['delay_seconds'] > delay_threshold]
+    filtered_count = len(filtered_records)
+    total_count = len(latest_records)
+    percentage = (filtered_count / total_count * 100) if total_count > 0 else 0
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("大于阈值的记录数", filtered_count)
+    with col2:
+        st.metric("占总记录百分比", f"{percentage:.2f}%")
+    
+    # 显示筛选后的记录
+    if not filtered_records.empty:
+        with st.expander("查看大于阈值的记录详情", expanded=True):
+            st.dataframe(filtered_records[['contactid', 'initiationtimestamp', 
+                                          'connectedtosystemtimestamp', 'delay_seconds', 
+                                          'channel', 'lastupdatetimestamp']])
+    
+    # 按渠道分析延迟
+    if 'channel' in latest_records.columns:
+        st.subheader("不同渠道延迟时间分析")
+        
+        # 按渠道分组的统计信息
+        channel_stats = latest_records.groupby('channel')['delay_seconds'].agg(['mean', 'median', 'count']).reset_index()
+        
+        # 渠道延迟条形图 (使用Streamlit的内置图表)
+        st.bar_chart(
+            data=channel_stats,
+            x='channel',
+            y='mean',
+            use_container_width=True
+        )
+        
+        # 显示渠道统计数据表格
+        st.write("各渠道延迟统计：")
+        st.dataframe(channel_stats)
+    
+    # 时间序列分析
+    st.subheader("延迟时间变化趋势")
+    
+    # 将日期提取为新列用于分组
+    latest_records['date'] = latest_records['initiationtimestamp'].dt.date
+    
+    # 按日期分组计算平均延迟时间
+    daily_stats = latest_records.groupby('date')['delay_seconds'].agg(['mean', 'count']).reset_index()
+    daily_stats['date'] = pd.to_datetime(daily_stats['date'])
+    
+    # 创建时间序列图 (使用Streamlit的内置图表)
+    st.line_chart(
+        data=daily_stats,
+        x='date',
+        y='mean',
+        use_container_width=True
+    )
+    
+    # 显示日期统计数据表格
+    st.write("每日延迟统计：")
+    st.dataframe(daily_stats)
+    
+    # 下载处理后的数据
+    st.subheader("数据导出")
+    
+    # 将处理后的数据提供给用户下载
+    csv = latest_records.to_csv(index=False).encode('utf-8')
+    
+    # 使用回调函数确保下载后保持分析状态
+    def maintain_state():
+        st.session_state.show_analysis = True
+    
+    st.download_button(
+        label="下载筛选后的数据",
+        data=csv,
+        file_name="contact_delay_analysis.csv",
+        mime="text/csv",
+        on_click=maintain_state
+    )
+    
+    # 如果有大于阈值的记录，也提供这部分数据的下载
+    if not filtered_records.empty:
+        filtered_csv = filtered_records.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="下载大于阈值的记录",
+            data=filtered_csv,
+            file_name=f"contacts_with_delay_over_{delay_threshold}s.csv",
+            mime="text/csv",
+            on_click=maintain_state
+        )
 
 # 设置页面配置
 st.set_page_config(
@@ -286,48 +474,17 @@ with log_container:
         """, unsafe_allow_html=True)
 
 
+# 使用session_state来跟踪是否应该显示分析结果
+if 'show_analysis' not in st.session_state:
+    st.session_state.show_analysis = False
+
 visualize_button = st.button('Visualize CSV')
 if visualize_button:
-    all_files = glob.glob(os.path.join(folder_path, "*.csv"))
-    li = []
-    for filename in all_files:
-        df = pd.read_csv(filename, index_col=None, header=0)
-        df = df[df['channel'] == 'VOICE']
-        not_null = df['agent'].notna()
-        df['agentinteractionduration_seconds'] = df.loc[not_null,
-                                                        'agent'].apply(get_agent_interaction_duration)
-        df['aftercontactworkduration_seconds'] = df.loc[not_null,
-                                                        'agent'].apply(get_after_contact_work_duration)
+    st.session_state.show_analysis = True
 
-        df['initiationtimestampnew'] = pd.to_datetime(
-            df['initiationtimestamp'])
-        df['disconnecttimestampnew'] = pd.to_datetime(
-            df['disconnecttimestamp'])
-        df['date'] = pd.to_datetime(
-            df['disconnecttimestamp']).dt.strftime('%Y-%m-%d')
-
-        df['contactduration'] = df['disconnecttimestampnew'] - \
-            df['initiationtimestampnew']
-        df['contactduration_seconds'] = df['contactduration'].dt.total_seconds()
-
-        df = df[['contactid', 'channel', 'initiationtimestamp', 'initiationtimestampnew', 'connectedtosystemtimestamp', 'date',
-                'agentinteractionduration_seconds', 'aftercontactworkduration_seconds', 'disconnecttimestamp', 'disconnecttimestampnew', 'contactduration_seconds']]
-        li.append(df)
-
-    if li:
-        frame = pd.concat(li, axis=0, ignore_index=True)
-        frame = frame.sort_values(by='date').reset_index(drop=True)
-        st.dataframe(frame)
-
-        # 每日聚合
-        daily_df = frame.groupby('date').agg({'agentinteractionduration_seconds': 'sum',
-                                            'contactduration_seconds': 'sum'}).reset_index()
-        daily_df = daily_df.sort_values(by='date')
-
-        st.bar_chart(daily_df, x='date')
-        st.write(daily_df)
-    else:
-        st.write("未找到可视化的 CSV 文件。")
+# 如果应该显示分析结果，则显示
+if st.session_state.show_analysis:
+    contact_delay_analyzer(os.path.join(folder_path, "ctr_data.csv"))
 
 # 搜索功能
 if 'contact_id' not in st.session_state:
