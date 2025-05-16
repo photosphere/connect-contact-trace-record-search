@@ -59,4 +59,4 @@ streamlit run contact_trace_record_search.py
 ```bash
 streamlit run contact_trace_record_search.py --server.port 8080 --server.address=0.0.0.0 
 ```
-<img width="1610" alt="Contact Search" src="https://github.com/photosphere/connect-contact-trace-record-search/assets/3398595/ace85910-38fd-490e-8b4f-a636cada0a8d">
+<img width="1610" alt="Contact Search" src="https://github.com/user-attachments/assets/3c28f537-c989-4e97-bb0b-0f6e3ac68e15">
